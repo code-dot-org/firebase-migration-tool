@@ -1077,7 +1077,12 @@ void setupDB(sql::Connection *db) {
 
 int main(int argc, char *argv[]) {
   if (argc != 2) {
-    cout << "Usage: " << argv[0] << " <json file>" << endl;
+    cout << "Usage: " << endl;
+    cout << "\t" << argv[0] << " <json file>" << endl;
+    cout << "\t" << argv[0] << " <json.gz file>" << endl;
+    cout << "\t" << argv[0] << " stdin" << endl;
+    cout << "\t" << "gunzip -c ./prod-firebase-data.json.gz | " << argv[0] << " stdin" << endl;
+    cout << endl;
     return 1;
   }
 
