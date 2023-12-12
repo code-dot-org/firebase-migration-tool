@@ -1,3 +1,14 @@
+# Firebase Migration Tool
+
+As part of migrating Applab to use MySQL instead of Firebase, we have to migrate existing data. We'll be migrating a terabyte of firebase JSON to MySQL (see: https://github.com/code-dot-org/code-dot-org/issues/55084). Initial versions of this tool were written in Ruby (and Javascript), but performance was so slow it would have taken many days to migrate data, possibly more than a week. The current version of the tool is written in C++ using the RapidJSON (https://rapidjson.org/) library, conveniently the same JSON parser as MySQL uses internally.
+
+The tool:
+1. Does a streaming "SAX-like" parse because all the JSON will not fit into memory.
+2. Supports uploading data as a row-per-student-record, row-per-student-table or row-per-student-project format.
+3. Detects stock datasets and optionally deplicates them.
+4. Uses a configurable number of background threads for uploading data to MySQL, unblocking the main thread for JSON parsing (this is the bottleneck currently).
+5. Validates JSON record rows before inserting them, drops invalid rows.
+
 # For MacOS:
 
 ## Edit mysql-connector-c++ to install jdbc.h
