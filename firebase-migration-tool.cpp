@@ -933,6 +933,11 @@ void handleParseError(ParseResult result, string filename) {
 void parseFirebaseJSON(string filename) {
   RawJSONHandler handler;
   //Reader reader;
+
+  // MungedReader is created by US, and is derived from
+  // rapidjson/reader.h. It is a one-line hack that permits
+  // parsing `\Uxxx` as a valid unicode escape (case is wrong on U).
+  // Otherwise RapidJSON can't deal with firebase output.
   MungedReader<UTF8<>, UTF8<> > reader;
 
   loadDataBufferDir =  TMP_DIR + filename + "-tsvs/";
