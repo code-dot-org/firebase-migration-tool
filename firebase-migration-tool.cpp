@@ -70,9 +70,9 @@ const bool DEDUPE_STOCK_TABLES = true;
 // runs in a single-thread. Blocking the main thread for this appears
 // to be a bottleneck on total throughput.
 const bool DEDUPE_STOCK_TABLES_IN_BG_THREAD = true;
-const uint NUM_DEDUPE_STOCK_TABLES_THREADS = 4;
-const bool DEDUPE_STOCK_TABLES_IN_BG_THREAD_TABLE_LEVEL_LOCKING = false;
-const uint DEDUPE_BG_THREAD_QUEUE_SIZE = 8;
+const uint NUM_DEDUPE_STOCK_TABLES_THREADS = 6;
+const bool DEDUPE_STOCK_TABLES_IN_BG_THREAD_TABLE_LEVEL_LOCKING = true;
+const uint DEDUPE_BG_THREAD_QUEUE_SIZE = NUM_DEDUPE_STOCK_TABLES_THREADS * 4;
 
 // Use bulk `LOAD DATA LOCAL INFILE` instead of `INSERT INTO` statements
 // LOAD DATA INFILE statements /should/ be much faster, it copies the
@@ -377,8 +377,8 @@ inline bool isStockTable(const string &tableName, const string &json) {
 
   static unordered_map<string, string> stockTableJSON;
   static unordered_map<string, uint64_t> tableNameToCount; // if TABLE_NAME_COUNTING
-  static uint64_t tableBytes = 0; // DONT_UPLOAD_STOCK_TABLES
-  static uint64_t tableBytesStock = 0; // DONT_UPLOAD_STOCK_TABLES
+  static uint64_t tableBytes = 0; // DEDUPE_STOCK_TABLES
+  static uint64_t tableBytesStock = 0; // DEDUPE_STOCK_TABLES
 
   static bool firstTimeRun = true;
   if (firstTimeRun) {
@@ -442,7 +442,7 @@ inline bool isStockTable(const string &tableName, const string &json) {
     // burp once every 10000 times
     static uint64_t nTimesSincePrint = 0;
     if (DEDUPE_STOCK_TABLES && nTimesSincePrint++ % 10000 == 0)
-      cout << "DONT_UPLOAD_STOCK_TABLES=true has skipped uploading of " << 100.0 * ((double)tableBytesStock) / tableBytes << "\%" << " of bytes" << endl;
+      cout << "DEDUPE_STOCK_TABLES=true has skipped uploading of " << 100.0 * ((double)tableBytesStock) / tableBytes << "\%" << " of bytes" << endl;
 
   }
 
@@ -501,6 +501,35 @@ inline void insertIntoDB(const string &channelId, const string &tableName, const
 
   if (DEDUPE_STOCK_TABLES_IN_BG_THREAD && !DEDUPE_STOCK_TABLES_IN_BG_THREAD_TABLE_LEVEL_LOCKING)
     insertIntoDBMutex.unlock();
+}
+
+static uint64_t singleRecordJSONParseErrors = 0;
+
+inline bool validateRecordJSON(const string &channelId, const string &tableName, const string &recordId,
+                  const string &jsonString) {
+  // It turns out the JSON parser MySQL uses is ... RapidJSON!
+  // So we can validate each row before sending it to MySQL
+  // for the case where we use a JSON column type
+  if (USE_MYSQL_JSON_COLUMN) {
+
+    // FIXME: this does a double-json-parse on some values
+    // because we also parse (some) json in isStockTable()
+
+    Document doc1;
+    ParseResult ok = doc1.Parse(jsonString.c_str());
+    if (!ok) {
+      singleRecordJSONParseErrors++;
+      cerr << endl;
+      cerr << "RECORD(" << channelId << ", " << tableName << ", " << recordId << ")" << endl;
+      cerr << "JSON parse error #" << singleRecordJSONParseErrors << ": " << GetParseError_En(ok.Code()) << " (" << ok.Offset() << ")" << endl;
+      cerr << endl;
+      cerr << "Trying to parse " << ":" << endl;
+      cerr << jsonString << endl;
+      cerr << endl;
+      return false;
+    }
+    return true;
+  }
 }
 
 const string NO_TABLE_NAME = "";
@@ -591,7 +620,11 @@ inline void insertTableIntoDB(
         insertIntoDB(channelId, tableName, NO_RECORD_ID, json.c_str());
       } else if (KIND_OF_ROW == Record) {
         for (auto &record : recordsInTable) {
-          insertIntoDB(channelId, tableName, record.first, record.second);
+          const string &recordId = record.first;
+          const string &jsonString = record.second;
+          if (validateRecordJSON(channelId, tableName, recordId, jsonString)) {
+            insertIntoDB(channelId, tableName, recordId, jsonString);
+          }
         }
       }
 
@@ -659,6 +692,7 @@ void dedupeStockTablesThread() {
   doneFeedingDataThreads = true;
 }
 
+uint64_t nFullDedupeQueueEvents = 0;
 inline void endTable(const string &tableName) {
   if (FINE_DEBUG) cout << "END TABLE" << endl;
 
@@ -669,8 +703,10 @@ inline void endTable(const string &tableName) {
 
     if (DEDUPE_STOCK_TABLES_IN_BG_THREAD) {
       TableQueueItem *queueItem = new TableQueueItem(channelId, tableName, json, recordsInTable);
-      if (dedupeStockTablesQueueSize++ > DEDUPE_BG_THREAD_QUEUE_SIZE) {
-        cout << "WARNING: dedupeStockTablesQueueSize=" << dedupeStockTablesQueueSize << endl;
+      if (dedupeStockTablesQueueSize++ >= DEDUPE_BG_THREAD_QUEUE_SIZE) {
+        nFullDedupeQueueEvents++;
+        if (nFullDedupeQueueEvents % 1000 == 0)
+          cout << "WARNING: dedupe threads might be running behind if you see this a lot, dedupeStockTablesQueueSize=" << dedupeStockTablesQueueSize << endl;
       };
       while (!dedupeStockTablesQueue.bounded_push(queueItem));
     } else {
@@ -686,39 +722,17 @@ inline void endTable(const string &tableName) {
   }
 }
 
-static uint64_t singleRecordJSONParseErrors = 0;
-inline void handleRecord(string channelId, string tableName, string recordId,
-                  string jsonString) {
+inline void handleRecord(const string &channelId, const string &tableName, const string &recordId,
+                  const string &jsonString) {
   if (RAW_DEBUG)
     cout << "RECORD(" << channelId << ", " << tableName << ", " << recordId << ") = " << jsonString << endl;
-
-  // It turns out the JSON parser MySQL uses is ... RapidJSON!
-  // So we can validate each row before sending it to MySQL
-  // for the case where we use a JSON column type
-  if (USE_MYSQL_JSON_COLUMN) {
-
-    // FIXME: this does a double-json-parse on some values
-    // because we also parse (some) json in isStockTable()
-
-    Document doc1;
-    ParseResult ok = doc1.Parse(jsonString.c_str());
-    if (!ok) {
-      singleRecordJSONParseErrors++;
-      cerr << endl;
-      cerr << "RECORD(" << channelId << ", " << tableName << ", " << recordId << ")" << endl;
-      cerr << "JSON parse error #" << singleRecordJSONParseErrors << ": " << GetParseError_En(ok.Code()) << " (" << ok.Offset() << ")" << endl;
-      cerr << endl;
-      cerr << "Trying to parse " << ":" << endl;
-      cerr << jsonString << endl;
-      cerr << endl;
-      return;
-    }
-  }
 
   if (DEDUPE_STOCK_TABLES) {
     recordsInTable.push_back(make_pair(recordId, jsonString));
   } else {
-    insertIntoDB(channelId, tableName, recordId, jsonString.c_str());
+    if (validateRecordJSON(channelId, tableName, recordId, jsonString)) {
+      insertIntoDB(channelId, tableName, recordId, jsonString.c_str());
+    }
   }
 }
 
