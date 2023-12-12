@@ -70,7 +70,8 @@ const bool DEDUPE_STOCK_TABLES = true;
 // runs in a single-thread. Blocking the main thread for this appears
 // to be a bottleneck on total throughput.
 const bool DEDUPE_STOCK_TABLES_IN_BG_THREAD = true;
-const uint NUM_DEDUPE_STOCK_TABLES_THREADS = 1; // warning, we only support 1 thread atm
+const uint NUM_DEDUPE_STOCK_TABLES_THREADS = 4;
+const bool DEDUPE_STOCK_TABLES_IN_BG_THREAD_TABLE_LEVEL_LOCKING = false;
 
 // Use bulk `LOAD DATA LOCAL INFILE` instead of `INSERT INTO` statements
 // LOAD DATA INFILE statements /should/ be much faster, it copies the
@@ -381,7 +382,8 @@ inline bool isStockTable(const string &tableName, const string &json) {
   static bool firstTimeRun = true;
   if (firstTimeRun) {
     firstTimeRun = false;
-    cerr << "WARNING: inStockTable() is really slow, it does a JSON deep equal, and we should move its execution to a data thread" << endl;
+    if (!DEDUPE_STOCK_TABLES_IN_BG_THREAD)
+      cerr << "WARNING: inStockTable() is really slow, it does a JSON deep equal, and we should move its execution to a data thread" << endl;
   }
 
   auto bytes = json.length();
@@ -447,7 +449,10 @@ inline bool isStockTable(const string &tableName, const string &json) {
 }
 
 inline void insertIntoDB(const string &channelId, const string &tableName, const string &recordId, const string &json) {
-    
+  static std::mutex insertIntoDBMutex;
+  if (DEDUPE_STOCK_TABLES_IN_BG_THREAD && !DEDUPE_STOCK_TABLES_IN_BG_THREAD_TABLE_LEVEL_LOCKING)
+    insertIntoDBMutex.lock();
+
   unComittedRecords++;
 
   if (LOAD_DATA_INSTEAD_OF_INSERT) {
@@ -492,6 +497,9 @@ inline void insertIntoDB(const string &channelId, const string &tableName, const
   if (unComittedRecords >= NUMBER_OF_ROWS_BEFORE_COMMIT) {
     commitRecords();
   }
+
+  if (DEDUPE_STOCK_TABLES_IN_BG_THREAD && !DEDUPE_STOCK_TABLES_IN_BG_THREAD_TABLE_LEVEL_LOCKING)
+    insertIntoDBMutex.unlock();
 }
 
 const string NO_TABLE_NAME = "";
@@ -551,7 +559,9 @@ inline void startTable(const string &tableName) {
 using TableRecords = vector<pair<string, string>>;
 TableRecords recordsInTable;
 using TableQueueItem = tuple<string,string,string,TableRecords>;
-boost::lockfree::spsc_queue<TableQueueItem, boost::lockfree::capacity<4>> dedupeStockTablesQueue;
+boost::lockfree::queue<TableQueueItem*, boost::lockfree::capacity<4>> dedupeStockTablesQueue;
+
+
 std::atomic<uint64_t> dedupeStockTablesQueueSize{0};
 boost::atomic<bool> doneFeedingDedupeThreads(false);
 
@@ -567,6 +577,15 @@ inline void insertTableIntoDB(
     if (DEDUPE_STOCK_TABLES && isStockTable(tableName, json)) {
       // cout << "SKIPPING STOCK TABLE " << tableName << endl;
     } else {
+      // For some reason, we see higher perf doing this mutex lock *inside*
+      // the insertIntoDB call vs here. I would have thought locking per-row
+      // vs per-table would be slower, yet it seems 10% faster. The caveat
+      // is that table rows will be interleaved if we do per-row locking.
+
+      static std::mutex insertIntoDBMutex;
+      if (DEDUPE_STOCK_TABLES_IN_BG_THREAD_TABLE_LEVEL_LOCKING)
+        insertIntoDBMutex.lock();
+
       if (KIND_OF_ROW == Table) {
         insertIntoDB(channelId, tableName, NO_RECORD_ID, json.c_str());
       } else if (KIND_OF_ROW == Record) {
@@ -574,6 +593,9 @@ inline void insertTableIntoDB(
           insertIntoDB(channelId, tableName, record.first, record.second);
         }
       }
+
+      if (DEDUPE_STOCK_TABLES_IN_BG_THREAD_TABLE_LEVEL_LOCKING)
+        insertIntoDBMutex.unlock();
 
       static uint64_t nTablesUploaded = 1;
       if (nTablesUploaded++ % 5000 == 0) {
@@ -599,12 +621,13 @@ inline void insertTableIntoDB(
 }
 
 
-inline void insertTableIntoDB(TableQueueItem &queueItem) {
-  string &channelId = get<0>(queueItem);
-  string &tableName = get<1>(queueItem);
-  string &json = get<2>(queueItem);
-  TableRecords &recordsInTable = get<3>(queueItem);
+inline void insertTableIntoDB(TableQueueItem *queueItem) {
+  string &channelId = get<0>(*queueItem);
+  string &tableName = get<1>(*queueItem);
+  string &json = get<2>(*queueItem);
+  TableRecords &recordsInTable = get<3>(*queueItem);
   insertTableIntoDB(channelId, tableName, json, recordsInTable);
+  delete queueItem;
 }
 
 
@@ -613,7 +636,7 @@ void dedupeStockTablesThread() {
   pthread_setname_np(pthread_self(), "dedupeThread");
 
   cout << "dedupeStockTablesThread: starting" << endl;
-  TableQueueItem queueItem;
+  TableQueueItem *queueItem;
   while (!doneFeedingDedupeThreads) {
     while (dedupeStockTablesQueue.pop(queueItem)) {
       // cout << "dedupeStockTablesThread: taking job (queue size=" << --dedupeStockTablesQueueSize << ")" << endl;
@@ -643,9 +666,9 @@ inline void endTable(const string &tableName) {
     const string &channelId = currentChannelName;
 
     if (DEDUPE_STOCK_TABLES_IN_BG_THREAD) {
-      TableQueueItem queueItem = make_tuple(channelId, tableName, json, recordsInTable);
+      TableQueueItem *queueItem = new TableQueueItem(channelId, tableName, json, recordsInTable);
       if (dedupeStockTablesQueueSize++ > 2) {
-        cout << "dedupeStockTablesQueueSize=" << dedupeStockTablesQueueSize << endl;
+        //cout << "dedupeStockTablesQueueSize=" << dedupeStockTablesQueueSize << endl;
       };
       while (!dedupeStockTablesQueue.push(queueItem));
     } else {
