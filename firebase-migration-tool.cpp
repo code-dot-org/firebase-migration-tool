@@ -985,7 +985,6 @@ void parseFirebaseJSON(string filename) {
     char readBuffer[1048576];
     rapidjson::IStreamWrapper iStreamWrapper(gzipStream, readBuffer, sizeof(readBuffer));
 
-    rapidjson::Reader reader;
     ParseResult ok = reader.Parse(iStreamWrapper, handler);
   } else {
     originalJSONBytes = std::filesystem::file_size(filename);
