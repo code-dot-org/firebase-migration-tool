@@ -963,8 +963,12 @@ void parseFirebaseJSON(string filename) {
     // Start the parse going, everything happens here
     ok = reader.Parse(is, handler);
   } else if (ends_with(filename, ".gz")) {
+    cerr << endl;
     cerr << "WARNING: parsing gzipped file, this will be slower, last benchmarked at 30\% slower (100MB/s vs 150MB/s)" << endl;
-
+    cerr << endl;
+    cerr << "To get 130MB/s but still read from gunzip, consider using a pipe between gunzip and this program instead:" << endl;
+    cerr << "\tgunzip -c ./prod-firebase-data.json.gz | ./firebase-migration-tool stdin" << endl;
+    cerr << endl;
     originalJSONBytes = std::filesystem::file_size(filename);
 
     // For percentage progress we assume the unzipped file
