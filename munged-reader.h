@@ -1,3 +1,11 @@
+// We, code.org firebase-migration-tool, have modified this file from its original form.
+// munged-reader.h is derived from rapidjson/reader.h, but we needed one instance of
+// more lenient parsing to deal with the firebase dump. We accept `\Uxxxx` as a valid
+// unicode escape sequence, as if it were `\uxxxx` (notice case).
+
+// Change is a one-liner, here:
+// https://github.com/code-dot-org/firebase-migration-tool/blob/81c657ad75ee23b1f2e1932f6aadeba087ba031f/munged-reader.h#L525
+
 // Tencent is pleased to support the open source community by making RapidJSON available.
 //
 // Copyright (C) 2015 THL A29 Limited, a Tencent company, and Milo Yip.
