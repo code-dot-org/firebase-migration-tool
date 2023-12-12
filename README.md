@@ -37,4 +37,4 @@ See: https://docs.brew.sh/FAQ#can-i-edit-formulae-myself
 You can use the `get-latest-firebase-data.sh` script to fetch the latest backup from firebase.
 
 1. make
-2. ./parse-firebase-json lil-prod.json
+2. ./firebase-migration-tool lil-prod.json
