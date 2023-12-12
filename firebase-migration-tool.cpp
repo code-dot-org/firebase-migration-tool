@@ -953,7 +953,6 @@ void parseFirebaseJSON(string filename) {
     string cmd = "sudo mount -t tmpfs -o size=" + to_string(TMP_DIR_TMPFS_SIZE) + " tmpfs " + TMP_DIR;
     cerr << "If not, run: " << cmd << endl;
     cerr << endl;
-    this_thread::sleep_for (std::chrono::seconds(2));
   }
   #endif
 
