@@ -13,6 +13,11 @@
 #include <boost/lockfree/queue.hpp>
 #include <boost/lockfree/spsc_queue.hpp>
 #include <boost/thread/thread.hpp>
+#include <boost/iostreams/copy.hpp>
+#include <boost/iostreams/filter/gzip.hpp>
+#include <boost/iostreams/filtering_streambuf.hpp>
+#include <boost/iostreams/filtering_stream.hpp>
+
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -947,15 +952,48 @@ void parseFirebaseJSON(string filename) {
   }
   #endif
 
-  originalJSONBytes = std::filesystem::file_size(filename);
+  ParseResult ok;
 
-  FILE *fp = fopen(filename.c_str(), "r");
-  
-  char readBuffer[65536];
-  FileReadStream is(fp, readBuffer, sizeof(readBuffer));
+  if (filename == "stdin") {
+    originalJSONBytes = 1021278241845;
+    cout << "Reading from stdin, for percent progress, assuming originalJSONBytes=" << originalJSONBytes << endl;
 
-  // Start the parse going, everything happens here
-  ParseResult ok = reader.Parse(is, handler);
+    char readBuffer[65536];
+    FileReadStream is(stdin, readBuffer, sizeof(readBuffer));
+    // Start the parse going, everything happens here
+    ok = reader.Parse(is, handler);
+  } else if (ends_with(filename, ".gz")) {
+    cerr << "WARNING: parsing gzipped file, this will be slower, last benchmarked at 30\% slower (100MB/s vs 150MB/s)" << endl;
+
+    originalJSONBytes = std::filesystem::file_size(filename);
+
+    // For percentage progress we assume the unzipped file
+    // is 10x. We're seeing a 10x compression ratio, and since
+    // our schema is relatively constant, this is probably
+    // accurate for most/much data 🤷‍♀️
+    originalJSONBytes *= 10;
+
+    ifstream jsonFile(filename, ios::binary);
+    boost::iostreams::filtering_istream gzipStream;
+    gzipStream.push(boost::iostreams::gzip_decompressor());
+    gzipStream.push(jsonFile);
+
+    char readBuffer[1048576];
+    rapidjson::IStreamWrapper iStreamWrapper(gzipStream, readBuffer, sizeof(readBuffer));
+
+    rapidjson::Reader reader;
+    ParseResult ok = reader.Parse(iStreamWrapper, handler);
+  } else {
+    originalJSONBytes = std::filesystem::file_size(filename);
+
+    FILE *fp = fopen(filename.c_str(), "r");
+    
+    char readBuffer[65536];
+    FileReadStream is(fp, readBuffer, sizeof(readBuffer));
+    // Start the parse going, everything happens here
+    ParseResult ok = reader.Parse(is, handler);
+  }
+
   if (!ok) {
     handleParseError(ok, filename);
   } else {
