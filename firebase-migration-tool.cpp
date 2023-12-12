@@ -72,6 +72,7 @@ const bool DEDUPE_STOCK_TABLES = true;
 const bool DEDUPE_STOCK_TABLES_IN_BG_THREAD = true;
 const uint NUM_DEDUPE_STOCK_TABLES_THREADS = 4;
 const bool DEDUPE_STOCK_TABLES_IN_BG_THREAD_TABLE_LEVEL_LOCKING = false;
+const uint DEDUPE_BG_THREAD_QUEUE_SIZE = 8;
 
 // Use bulk `LOAD DATA LOCAL INFILE` instead of `INSERT INTO` statements
 // LOAD DATA INFILE statements /should/ be much faster, it copies the
@@ -322,7 +323,7 @@ inline void commitRecords() {
       // we're using threads, but we're not in one, just queue it up
       char *filename = strdup(loadDataBufferTSVFilename.c_str());
       numDataJobsQueued++;
-      while (!loadDataFilenameQueue.push(filename));
+      while (!loadDataFilenameQueue.bounded_push(filename));
     } else {
       loadData(loadDataBufferTSVFilename);
     }
@@ -559,7 +560,7 @@ inline void startTable(const string &tableName) {
 using TableRecords = vector<pair<string, string>>;
 TableRecords recordsInTable;
 using TableQueueItem = tuple<string,string,string,TableRecords>;
-boost::lockfree::queue<TableQueueItem*, boost::lockfree::capacity<4>> dedupeStockTablesQueue;
+boost::lockfree::queue<TableQueueItem*, boost::lockfree::capacity<DEDUPE_BG_THREAD_QUEUE_SIZE>> dedupeStockTablesQueue;
 
 
 std::atomic<uint64_t> dedupeStockTablesQueueSize{0};
@@ -639,7 +640,8 @@ void dedupeStockTablesThread() {
   TableQueueItem *queueItem;
   while (!doneFeedingDedupeThreads) {
     while (dedupeStockTablesQueue.pop(queueItem)) {
-      // cout << "dedupeStockTablesThread: taking job (queue size=" << --dedupeStockTablesQueueSize << ")" << endl;
+      --dedupeStockTablesQueueSize;
+      // cout << "dedupeStockTablesThread: taking job (queue size=" << dedupeStockTablesQueueSize << ")" << endl;
       insertTableIntoDB(queueItem);
     }
   }
@@ -667,10 +669,10 @@ inline void endTable(const string &tableName) {
 
     if (DEDUPE_STOCK_TABLES_IN_BG_THREAD) {
       TableQueueItem *queueItem = new TableQueueItem(channelId, tableName, json, recordsInTable);
-      if (dedupeStockTablesQueueSize++ > 2) {
-        //cout << "dedupeStockTablesQueueSize=" << dedupeStockTablesQueueSize << endl;
+      if (dedupeStockTablesQueueSize++ > DEDUPE_BG_THREAD_QUEUE_SIZE) {
+        cout << "WARNING: dedupeStockTablesQueueSize=" << dedupeStockTablesQueueSize << endl;
       };
-      while (!dedupeStockTablesQueue.push(queueItem));
+      while (!dedupeStockTablesQueue.bounded_push(queueItem));
     } else {
       insertTableIntoDB(channelId, tableName, json, recordsInTable);
     }
